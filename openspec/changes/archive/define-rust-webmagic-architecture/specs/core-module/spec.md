@@ -55,6 +55,10 @@
 - **WHEN** 运行时使用框架内置的基础 HTML `PageProcessor`
 - **THEN** 它解析页面中的 `href` 链接，解析相对 URL 为绝对 URL，过滤跨站与非 HTTP(S) 链接，并把结果作为新请求集合返回给 `Scheduler`
 
+#### Scenario: 脚本状态处理器从内联数据中抽取页面链接
+- **WHEN** 页面是 SPA 壳页面，链接主要存在于内联 `script` 的 JSON 或 JS 状态对象中
+- **THEN** 框架内置的脚本数据 `PageProcessor` 会从这些内联数据里提取同站点页面 URL，并把结果作为新请求集合返回给 `Scheduler`
+
 ### Requirement: Scheduler is a facade over deduplication and queueing
 `Scheduler` SHALL 对上层提供统一调度门面，并在内部封装 URL 去重与队列管理能力。
 
@@ -66,9 +70,31 @@
 - **WHEN** 某个域名已经达到配置中的最大页面数
 - **THEN** `Scheduler` 丢弃该域名后续的新请求，并保持 Spider 通过 in-flight 计数自然收敛退出
 
+### Requirement: Pipeline must consume items as immutable shared inputs
+`Pipeline` SHALL 以不可变借用方式接收 `Item`，避免 pipeline 对抓取结果进行回写，并允许 Spider 将同一个 `Item` 广播给多个 pipeline 共享处理。
+
+#### Scenario: Spider 把一个 Item 广播给多个 Pipeline
+- **WHEN** 某个页面处理结果包含一个或多个 `Item`
+- **THEN** Spider 对每个 `Item` 并发调用所有已挂载 pipeline，并保持 pipeline 之间互不影响
+
+#### Scenario: Pipeline 处理失败不污染原始 Item
+- **WHEN** 某个 pipeline 在处理 `Item` 时失败
+- **THEN** 失败只体现在该 pipeline 的返回结果与 Spider 错误统计中，不允许通过可变引用修改原始 `Item`
+
+### Requirement: Core module must provide a baseline json-file pipeline
+`crates/core` 模块 SHALL 提供 `JsonFilePipeline`，把 `Item` 以 JSON Lines 形式异步追加写入本地文件，作为本地调试与极简落盘的基线实现。
+
+#### Scenario: 多个 worker 并发写同一个结果文件
+- **WHEN** 多个 worker 几乎同时把不同 `Item` 交给同一个 `JsonFilePipeline`
+- **THEN** pipeline 通过串行化的后台写入机制保证文件内容按行追加，不发生交错损坏
+
 ### Requirement: SpiderBuilder assembles spiders across deployment modes
 `SpiderBuilder` SHALL 作为统一装配入口，将共享项目定义与核心 Trait 组合为可在 CLI 与 Server 两种模式下运行的 Spider。
 
 #### Scenario: 复用同一装配逻辑运行不同部署形态
 - **WHEN** 应用在本地单机模式与分布式模式下构建 Spider
 - **THEN** 它们复用同一套 SpiderBuilder 装配逻辑，只替换具体运行时组件实现
+
+#### Scenario: 组合多个页面处理策略
+- **WHEN** 调用方希望同时覆盖传统 HTML 页面和 SPA 壳页面
+- **THEN** 它可以装配一个组合型 `PageProcessor`，合并锚点抽链与脚本数据抽链结果

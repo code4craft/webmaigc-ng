@@ -1,10 +1,13 @@
 use std::{
     collections::BTreeMap,
     io::{self, Write},
+    path::PathBuf,
     sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde_json::json;
+use tokio::fs;
 
 use super::*;
 use crate::Item;
@@ -27,7 +30,7 @@ async fn json_lines_pipeline_writes_one_record_per_line() {
     let pipeline = JsonLinesPipeline::from_writer(SharedBuffer(buffer.clone()));
 
     pipeline
-        .process(Item::new(BTreeMap::from([
+        .process(&Item::new(BTreeMap::from([
             ("url".to_string(), json!("https://example.com/a")),
             ("status".to_string(), json!(200)),
         ])))
@@ -35,7 +38,7 @@ async fn json_lines_pipeline_writes_one_record_per_line() {
         .expect("first item should be written");
 
     pipeline
-        .process(Item::new(BTreeMap::from([(
+        .process(&Item::new(BTreeMap::from([(
             "url".to_string(),
             json!("https://example.com/b"),
         )])))
@@ -51,4 +54,45 @@ async fn json_lines_pipeline_writes_one_record_per_line() {
     assert!(lines[0].contains("\"url\":\"https://example.com/a\""));
     assert!(lines[0].contains("\"status\":200"));
     assert!(lines[1].contains("\"url\":\"https://example.com/b\""));
+}
+
+#[tokio::test]
+async fn json_file_pipeline_appends_one_record_per_line() {
+    let path = unique_path("json-file-pipeline");
+    let pipeline = JsonFilePipeline::new(&path).expect("pipeline should build");
+    let first = Item::new(BTreeMap::from([(
+        "url".to_string(),
+        json!("https://example.com/a"),
+    )]));
+    let second = Item::new(BTreeMap::from([(
+        "url".to_string(),
+        json!("https://example.com/b"),
+    )]));
+
+    pipeline
+        .process(&first)
+        .await
+        .expect("first item should be written");
+    pipeline
+        .process(&second)
+        .await
+        .expect("second item should be written");
+
+    let text = fs::read_to_string(&path)
+        .await
+        .expect("json lines file should exist");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2);
+    assert!(lines[0].contains("\"url\":\"https://example.com/a\""));
+    assert!(lines[1].contains("\"url\":\"https://example.com/b\""));
+
+    let _ = std::fs::remove_file(path);
+}
+
+fn unique_path(prefix: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!("{prefix}-{nanos}.jsonl"))
 }

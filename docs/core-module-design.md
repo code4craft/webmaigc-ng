@@ -65,7 +65,7 @@
 - `Downloader`: 只负责网络 I/O，包括协议、代理、重试、压缩和连接复用。
 - `PageProcessor`: 只负责把页面转换为结构化结果和新请求，不拥有调度与持久化。
 - `Scheduler`: 统一封装去重和排队，对上层暴露单一调度门面，并返回逐请求调度反馈。
-- `Pipeline`: 只负责结果落地，不参与页面解析与抓取顺序控制。
+- `Pipeline`: 只负责结果落地，不参与页面解析与抓取顺序控制，并且只能以只读方式消费 `Item`。
 
 当前内置的基础 `HtmlLinkPageProcessor` 语义是：
 
@@ -74,6 +74,20 @@
 - 过滤跨站、`mailto:`、`javascript:`、`tel:`、纯 fragment 和非 HTTP(S) 链接
 - 在单页内先做一次去重，再把链接作为新请求集合返回给 `Scheduler`
 - 同时输出当前页面的基础元信息 `Item`，便于 Quick Start 模式直接观察抓取结果
+
+当前内置的 `ScriptDataPageProcessor` 语义是：
+
+- 扫描内联 `script` 内容，而不是外链脚本文件
+- 优先尝试把脚本内容按 JSON 解析，并递归扫描字符串值里的 URL
+- 对非 JSON 的状态赋值脚本，再做一层 quoted URL 字符串提取
+- 只接受同站点、看起来像页面而不是静态资源的 URL
+
+当前默认组合处理器 `SmartPageProcessor` 语义是：
+
+- 先运行 `HtmlLinkPageProcessor`
+- 再运行 `ScriptDataPageProcessor`
+- 合并两者发现的请求并做去重
+- 保留 HTML 处理器产出的页面元信息 `Item`
 
 当前默认下载器的能力边界是：
 
@@ -123,6 +137,13 @@
 - 默认实现支持 `max_pages_per_site` 配置，按域名统计已接受页面数；达到上限后，同域名新请求直接丢弃。
 - 通过 `close` 暴露关闭门面，阻止后续提交；单机和分布式实现都用同一种方式优雅终止。
 
+当前 `Pipeline` 的执行模型是：
+
+- `Pipeline::process` 接收 `&Item`，不允许 pipeline 回写原始数据
+- `Spider` 对单个 `Item` 会把所有已挂载 pipeline 做一次 fan-out 广播
+- 广播执行按 `Item` 粒度并发，适合把本地文件、数据库和消息队列输出并行推进
+- pipeline 失败会体现在运行错误统计中，但不会阻断同一 `Item` 被其他 pipeline 消费
+
 当前 `RequestQueue` 的最小 contract 是：
 
 - `push` 写入新请求
@@ -136,6 +157,7 @@
 - 默认：单机模式，使用 `MemoryDuplicateRemover + DefaultScheduler + SpiderEngine`
 - 分布式：用户注入分布式去重器并复用 engine-backed scheduler，或直接注入自定义 `Scheduler`
 - 自定义：用户直接注入自己的 `Scheduler`
+- `pipeline(...)` 支持多次调用，按挂载顺序累积多个 pipeline；也可以直接通过 `pipelines(...)` 注入一组 pipeline
 
 当前 `EngineConfig` 除并发与队列参数外，还暴露：
 
@@ -171,7 +193,7 @@
 当前 `Spider::run` 的运行模型是：
 
 - 入参为 seed 请求列表；`EngineConfig` 在 build 时注入，不传则用默认。
-- 启动 `worker_count` 个 worker 协程，从 `SpiderEngine` 全局通道消费请求，串联 `Downloader → PageProcessor → Pipeline`，并把派生请求回写 `Scheduler::schedule`。
+- 启动 `worker_count` 个 worker 协程，从 `SpiderEngine` 全局通道消费请求，串联 `Downloader → PageProcessor → Pipeline fan-out`，并把派生请求回写 `Scheduler::schedule`。
 - 主流程维护 `in_flight` 计数：`schedule` 接受的请求数为初始值，每个 worker 完成一个请求扣减 1、新派生 accepted 加回；`in_flight` 归零即视为运行结束。
 - 终止顺序：`Scheduler::close` → `SpiderEngine::shutdown` 关闭全局通道 → worker 退出 → 汇总 `RunReport`。
 - `RunReport` 当前仅暴露 `processed / items / discovered / errors` 计数，不返回逐请求详情，避免在长跑场景下把详细记录全部装载进内存。
@@ -185,11 +207,12 @@
 - `JsonLinesPipeline::stdout()` 是 Quick Start CLI 的默认数据通道，绑定到进程的 stdout。
 - 任何实现 `Write + Send + 'static` 的对象都可以通过 `from_writer` 注入，用于测试或将数据流重定向到文件。
 - 序列化失败、IO 失败或 Mutex 中毒会以 `SpiderStage::Pipeline` 报告 `SpiderError`。
+- `JsonFilePipeline` 通过内部 channel + 单后台写协程，把多个 worker 的结果顺序追加到同一个 `.jsonl` 文件，避免并发写文件时内容交错。
 
 Quick Start CLI（`apps/cli`）的最小行为约束：
 
 - 通过命令行位置参数收集 seed URL，无 seed 或 `-h/--help` 时把 usage 写入 stderr 并以非零或 0 退出。
-- 默认装配 `DefaultDownloader` + `UrlEchoProcessor`（仅输出页面元信息）+ `JsonLinesPipeline::stdout()`，让 `cargo run -p webmagic-cli https://example.com` 端到端跑通。
+- 默认装配 `DefaultDownloader` + `SmartPageProcessor` + `JsonLinesPipeline::stdout()`，让 `cargo run -p webmagic-cli https://example.com` 端到端跑通。
 - Item 数据流走 stdout，运行进度与汇总信息走 stderr，避免污染下游 Unix 工具消费的数据。
 
 ## Open Questions

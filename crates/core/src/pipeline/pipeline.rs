@@ -7,5 +7,5 @@ use crate::{BoxFuture, Item, SpiderError};
 pub trait Pipeline: Send + Sync {
     type Error: From<SpiderError> + Send + 'static;
 
-    fn process(&self, item: Item) -> BoxFuture<'_, Result<(), Self::Error>>;
+    fn process<'a>(&'a self, item: &'a Item) -> BoxFuture<'a, Result<(), Self::Error>>;
 }

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use futures::future::join_all;
 use tokio::sync::{mpsc, Mutex};
 
 use crate::{
@@ -11,7 +12,7 @@ pub struct SpiderParts {
     pub downloader: Arc<DynDownloader>,
     pub processor: Arc<DynPageProcessor>,
     pub scheduler: Arc<DynScheduler>,
-    pub pipeline: Arc<DynPipeline>,
+    pub pipelines: Vec<Arc<DynPipeline>>,
 }
 
 #[derive(Clone)]
@@ -56,14 +57,14 @@ impl Spider {
             let rx = worker_rx.clone();
             let downloader = parts.downloader.clone();
             let processor = parts.processor.clone();
-            let pipeline = parts.pipeline.clone();
+            let pipelines = parts.pipelines.clone();
             let scheduler = parts.scheduler.clone();
             let done_tx = done_tx.clone();
 
             worker_handles.push(tokio::spawn(async move {
                 while let Ok(request) = rx.recv().await {
                     let outcome =
-                        process_one(&downloader, &processor, &pipeline, &scheduler, request).await;
+                        process_one(&downloader, &processor, &pipelines, &scheduler, request).await;
                     if done_tx.send(outcome).is_err() {
                         break;
                     }
@@ -124,7 +125,7 @@ struct WorkerOutcome {
 async fn process_one(
     downloader: &Arc<DynDownloader>,
     processor: &Arc<DynPageProcessor>,
-    pipeline: &Arc<DynPipeline>,
+    pipelines: &[Arc<DynPipeline>],
     scheduler: &Arc<DynScheduler>,
     request: Request,
 ) -> WorkerOutcome {
@@ -152,8 +153,9 @@ async fn process_one(
 
     let item_count = result.items.len();
     let mut failed = false;
-    for item in result.items {
-        if pipeline.process(item).await.is_err() {
+    for item in &result.items {
+        let results = join_all(pipelines.iter().map(|pipeline| pipeline.process(item))).await;
+        if results.into_iter().any(|result| result.is_err()) {
             failed = true;
         }
     }

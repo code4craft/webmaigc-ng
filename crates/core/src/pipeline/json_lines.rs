@@ -40,7 +40,7 @@ impl Default for JsonLinesPipeline {
 impl Pipeline for JsonLinesPipeline {
     type Error = SpiderError;
 
-    fn process(&self, item: Item) -> BoxFuture<'_, Result<(), Self::Error>> {
+    fn process<'a>(&'a self, item: &'a Item) -> BoxFuture<'a, Result<(), Self::Error>> {
         Box::pin(async move {
             let serialized = serde_json::to_string(&item)
                 .map_err(|err| SpiderError::new(SpiderStage::Pipeline, err.to_string()))?;

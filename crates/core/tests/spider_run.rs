@@ -69,8 +69,8 @@ struct CollectingPipeline {
 impl Pipeline for CollectingPipeline {
     type Error = SpiderError;
 
-    fn process(&self, item: Item) -> BoxFuture<'_, Result<(), Self::Error>> {
-        self.items.lock().unwrap().push(item);
+    fn process<'a>(&'a self, item: &'a Item) -> BoxFuture<'a, Result<(), Self::Error>> {
+        self.items.lock().unwrap().push(item.clone());
         Box::pin(async { Ok(()) })
     }
 }
@@ -112,6 +112,40 @@ async fn spider_run_processes_seeds_and_followups_to_completion() {
 
     assert_eq!(downloader.calls.load(Ordering::SeqCst), 3);
     assert_eq!(pipeline.items.lock().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn spider_run_broadcasts_each_item_to_all_pipelines() {
+    let downloader = Arc::new(CountingDownloader {
+        calls: AtomicUsize::new(0),
+    });
+    let processor = Arc::new(LinkProcessor {
+        seed_followups: Mutex::new(None),
+    });
+    let pipeline_a = Arc::new(CollectingPipeline {
+        items: Mutex::new(Vec::new()),
+    });
+    let pipeline_b = Arc::new(CollectingPipeline {
+        items: Mutex::new(Vec::new()),
+    });
+
+    let spider = SpiderBuilder::new()
+        .downloader(downloader)
+        .page_processor(processor)
+        .pipeline(pipeline_a.clone())
+        .pipeline(pipeline_b.clone())
+        .build()
+        .expect("builder should succeed");
+
+    let report = spider
+        .run(vec![Request::get("https://example.com/seed")])
+        .await
+        .expect("spider should complete");
+
+    assert_eq!(report.processed, 1);
+    assert_eq!(report.items, 1);
+    assert_eq!(pipeline_a.items.lock().unwrap().len(), 1);
+    assert_eq!(pipeline_b.items.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]

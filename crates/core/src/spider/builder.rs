@@ -34,7 +34,7 @@ pub struct SpiderBuilder {
     downloader: Option<Arc<DynDownloader>>,
     processor: Option<Arc<DynPageProcessor>>,
     scheduler: SchedulerWiring,
-    pipeline: Option<Arc<DynPipeline>>,
+    pipelines: Vec<Arc<DynPipeline>>,
     engine_config: Option<EngineConfig>,
 }
 
@@ -54,7 +54,12 @@ impl SpiderBuilder {
     }
 
     pub fn pipeline(mut self, pipeline: Arc<DynPipeline>) -> Self {
-        self.pipeline = Some(pipeline);
+        self.pipelines.push(pipeline);
+        self
+    }
+
+    pub fn pipelines(mut self, pipelines: impl IntoIterator<Item = Arc<DynPipeline>>) -> Self {
+        self.pipelines.extend(pipelines);
         self
     }
 
@@ -101,9 +106,11 @@ impl SpiderBuilder {
                     SpiderError::new(SpiderStage::Build, "missing page processor")
                 })?,
                 scheduler,
-                pipeline: self
-                    .pipeline
-                    .ok_or_else(|| SpiderError::new(SpiderStage::Build, "missing pipeline"))?,
+                pipelines: if self.pipelines.is_empty() {
+                    return Err(SpiderError::new(SpiderStage::Build, "missing pipeline"));
+                } else {
+                    self.pipelines
+                },
             },
             engine,
         })

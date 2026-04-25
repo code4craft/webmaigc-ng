@@ -5,7 +5,8 @@ use std::{
 
 use webmagic_core::{
     BoxFuture, DefaultDownloader, DefaultDownloaderConfig, Downloader, EngineConfig,
-    HtmlLinkPageProcessor, Item, Pipeline, Request, SpiderBuilder, SpiderError,
+    HtmlLinkPageProcessor, Item, PageProcessor, Pipeline, Request, ScriptDataPageProcessor,
+    SmartPageProcessor, SpiderBuilder, SpiderError,
 };
 
 #[tokio::test]
@@ -33,14 +34,14 @@ struct CollectingPipeline {
 impl Pipeline for CollectingPipeline {
     type Error = SpiderError;
 
-    fn process(&self, item: Item) -> BoxFuture<'_, Result<(), Self::Error>> {
-        self.items.lock().unwrap().push(item);
+    fn process<'a>(&'a self, item: &'a Item) -> BoxFuture<'a, Result<(), Self::Error>> {
+        self.items.lock().unwrap().push(item.clone());
         Box::pin(async { Ok(()) })
     }
 }
 
 #[tokio::test]
-async fn real_fetch_fifa_news_spider_runs_to_ten_pages() {
+async fn real_fetch_fifa_news_spider_does_not_treat_static_assets_as_pages() {
     let downloader = DefaultDownloader::new(DefaultDownloaderConfig::default())
         .expect("default downloader should build");
     let pipeline = Arc::new(CollectingPipeline {
@@ -62,8 +63,51 @@ async fn real_fetch_fifa_news_spider_runs_to_ten_pages() {
         .await
         .expect("spider should complete");
 
-    assert_eq!(report.processed, 10);
-    assert_eq!(report.items, 10);
+    assert_eq!(report.processed, 1);
+    assert_eq!(report.items, 1);
     assert_eq!(report.errors, 0);
-    assert_eq!(pipeline.items.lock().unwrap().len(), 10);
+    assert_eq!(pipeline.items.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn real_fetch_fifa_news_script_data_processor_extracts_same_site_page_url() {
+    let downloader = DefaultDownloader::new(DefaultDownloaderConfig::default())
+        .expect("default downloader should build");
+
+    let page = downloader
+        .download(Request::get("https://www.fifa.com/en/news"))
+        .await
+        .expect("default downloader should fetch fifa news page");
+
+    let result = ScriptDataPageProcessor::default()
+        .process(page)
+        .expect("script data processor should succeed");
+    let urls = result
+        .requests
+        .into_iter()
+        .map(|request| request.url)
+        .collect::<Vec<_>>();
+
+    assert!(urls.contains(&"https://www.fifa.com/auth".to_string()));
+}
+
+#[tokio::test]
+async fn real_fetch_fifa_news_smart_processor_discovers_more_than_plain_html() {
+    let downloader = DefaultDownloader::new(DefaultDownloaderConfig::default())
+        .expect("default downloader should build");
+
+    let page = downloader
+        .download(Request::get("https://www.fifa.com/en/news"))
+        .await
+        .expect("default downloader should fetch fifa news page");
+
+    let html_only = HtmlLinkPageProcessor::default()
+        .process(page.clone())
+        .expect("html processor should succeed");
+    let smart = SmartPageProcessor::default()
+        .process(page)
+        .expect("smart processor should succeed");
+
+    assert!(html_only.requests.is_empty());
+    assert!(!smart.requests.is_empty());
 }

@@ -8,23 +8,23 @@ use crate::{Item, Page, PageProcessor, ProcessResult, Request, SpiderError, Spid
 
 /// Baseline HTML processor that emits page metadata and discovers linked pages.
 ///
-/// It resolves relative `href` values against `Page::final_url`, keeps only same-host
-/// HTTP(S) targets, strips fragments, and deduplicates links found within the same page
-/// before handing them back to the scheduler for global deduplication.
+/// It resolves anchor `href` values against `Page::final_url`, keeps only same-host
+/// HTTP(S) page-like targets, strips fragments, and deduplicates links found within the
+/// same page before handing them back to the scheduler for global deduplication.
 pub struct HtmlLinkPageProcessor {
-    href_selector: Selector,
+    anchor_selector: Selector,
 }
 
 impl HtmlLinkPageProcessor {
     pub fn new() -> Result<Self, SpiderError> {
-        let href_selector = Selector::parse("a[href], link[href]").map_err(|err| {
+        let anchor_selector = Selector::parse("a[href]").map_err(|err| {
             SpiderError::new(
                 SpiderStage::Process,
-                format!("failed to compile href selector: {err}"),
+                format!("failed to compile anchor selector: {err}"),
             )
         })?;
 
-        Ok(Self { href_selector })
+        Ok(Self { anchor_selector })
     }
 }
 
@@ -59,7 +59,7 @@ impl PageProcessor for HtmlLinkPageProcessor {
         let body_str = String::from_utf8_lossy(&body);
         let document = Html::parse_document(&body_str);
         let mut links: BTreeSet<String> = BTreeSet::new();
-        for element in document.select(&self.href_selector) {
+        for element in document.select(&self.anchor_selector) {
             let Some(raw_href) = element.value().attr("href") else {
                 continue;
             };
@@ -83,6 +83,9 @@ impl PageProcessor for HtmlLinkPageProcessor {
                 continue;
             }
             resolved.set_fragment(None);
+            if !looks_like_html_page(&resolved) {
+                continue;
+            }
             links.insert(resolved.into());
         }
 
@@ -98,4 +101,45 @@ impl PageProcessor for HtmlLinkPageProcessor {
             requests: links.into_iter().map(Request::get).collect(),
         })
     }
+}
+
+fn looks_like_html_page(url: &Url) -> bool {
+    let path = url.path().to_ascii_lowercase();
+    let Some(last_segment) = path.rsplit('/').next() else {
+        return true;
+    };
+
+    if !last_segment.contains('.') {
+        return true;
+    }
+
+    !matches!(
+        last_segment.rsplit('.').next(),
+        Some(
+            "png"
+                | "jpg"
+                | "jpeg"
+                | "gif"
+                | "svg"
+                | "webp"
+                | "ico"
+                | "css"
+                | "js"
+                | "mjs"
+                | "json"
+                | "xml"
+                | "txt"
+                | "pdf"
+                | "zip"
+                | "gz"
+                | "woff"
+                | "woff2"
+                | "ttf"
+                | "eot"
+                | "mp4"
+                | "webm"
+                | "mp3"
+                | "webmanifest"
+        )
+    )
 }

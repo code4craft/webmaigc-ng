@@ -75,7 +75,7 @@ impl Scheduler for NoopScheduler {
 impl Pipeline for NoopPipeline {
     type Error = SpiderError;
 
-    fn process(&self, _item: Item) -> BoxFuture<'_, Result<(), Self::Error>> {
+    fn process<'a>(&'a self, _item: &'a Item) -> BoxFuture<'a, Result<(), Self::Error>> {
         Box::pin(async { Ok(()) })
     }
 }
