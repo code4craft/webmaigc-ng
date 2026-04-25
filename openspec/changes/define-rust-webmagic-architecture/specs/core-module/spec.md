@@ -51,6 +51,10 @@
 - **WHEN** Spider 把某个页面交给 `PageProcessor`
 - **THEN** 处理结果同时包含结构化数据和后续待抓取请求集合
 
+#### Scenario: 基础 HTML 处理器抽取页面链接
+- **WHEN** 运行时使用框架内置的基础 HTML `PageProcessor`
+- **THEN** 它解析页面中的 `href` 链接，解析相对 URL 为绝对 URL，过滤跨站与非 HTTP(S) 链接，并把结果作为新请求集合返回给 `Scheduler`
+
 ### Requirement: Scheduler is a facade over deduplication and queueing
 `Scheduler` SHALL 对上层提供统一调度门面，并在内部封装 URL 去重与队列管理能力。
 
@@ -58,10 +62,13 @@
 - **WHEN** `PageProcessor` 产生新请求集合
 - **THEN** Spider 通过 `Scheduler` 提交请求，而不是分别调用去重器和队列管理器
 
+#### Scenario: 站点达到页面上限后停止继续接受请求
+- **WHEN** 某个域名已经达到配置中的最大页面数
+- **THEN** `Scheduler` 丢弃该域名后续的新请求，并保持 Spider 通过 in-flight 计数自然收敛退出
+
 ### Requirement: SpiderBuilder assembles spiders across deployment modes
 `SpiderBuilder` SHALL 作为统一装配入口，将共享项目定义与核心 Trait 组合为可在 CLI 与 Server 两种模式下运行的 Spider。
 
 #### Scenario: 复用同一装配逻辑运行不同部署形态
 - **WHEN** 应用在本地单机模式与分布式模式下构建 Spider
 - **THEN** 它们复用同一套 SpiderBuilder 装配逻辑，只替换具体运行时组件实现
-

@@ -22,6 +22,7 @@ pub struct EngineConfig {
     pub global_channel_capacity: usize,
     pub domain_channel_capacity: usize,
     pub default_domain_qps: NonZeroU32,
+    pub max_pages_per_site: Option<usize>,
 }
 
 impl EngineConfig {
@@ -36,7 +37,13 @@ impl EngineConfig {
             global_channel_capacity,
             domain_channel_capacity,
             default_domain_qps,
+            max_pages_per_site: None,
         }
+    }
+
+    pub const fn with_max_pages_per_site(mut self, max_pages_per_site: usize) -> Self {
+        self.max_pages_per_site = Some(max_pages_per_site);
+        self
     }
 }
 
@@ -47,6 +54,7 @@ impl Default for EngineConfig {
             global_channel_capacity: 256,
             domain_channel_capacity: 1024,
             default_domain_qps: NonZeroU32::MIN,
+            max_pages_per_site: None,
         }
     }
 }
@@ -346,6 +354,12 @@ impl SpiderEngine {
 
     pub fn should_pull_more(&self) -> PullDecision {
         self.backpressure_snapshot().pull_decision
+    }
+
+    /// Close the engine's global worker channel so that domain dispatchers stop forwarding
+    /// and worker receivers observe end-of-stream once the channel is drained.
+    pub fn shutdown(&self) {
+        self.global_tx.close();
     }
 
     pub fn domain_handle(&self, domain: &str) -> Option<DomainDispatcherHandle> {

@@ -8,6 +8,12 @@
 - 首次进入仓库前，建议先确认本机已安装对应工具链：`rustup toolchain install 1.93.0`
 - 之后直接在仓库根目录运行 `cargo test`、`cargo fmt`、`cargo clippy`
 
+## Development Rules
+
+- 开发规范见 [docs/repo-conventions.md](/Users/yihua/coding/code4craft/webmaigc-ng/docs/repo-conventions.md)。
+- 面向 Agent/协作式开发的额外约束见 [AGENTS.md](/Users/yihua/coding/code4craft/webmaigc-ng/AGENTS.md)。
+- 结构性实现优先走 `openspec`，不要跳过 spec 直接做大改。
+
 ## Workspace Layout
 
 - `apps/cli`: 本地命令行入口，承接 Quick Start 模式。

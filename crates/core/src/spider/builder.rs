@@ -1,38 +1,31 @@
 use std::sync::Arc;
 
 use crate::{
-    DefaultScheduler, Downloader, DuplicateRemover, MemoryDuplicateRemover, MemoryRequestQueue,
-    PageProcessor, Pipeline, RequestQueue, Scheduler, Spider, SpiderError, SpiderParts,
-    SpiderStage,
+    DefaultScheduler, Downloader, EngineConfig, MemoryDuplicateRemover, PageProcessor, Pipeline,
+    Scheduler, Spider, SpiderEngine, SpiderError, SpiderParts, SpiderStage,
 };
 
 pub type DynDownloader = dyn Downloader<Error = SpiderError>;
 pub type DynPageProcessor = dyn PageProcessor<Error = SpiderError>;
 pub type DynScheduler = dyn Scheduler<Error = SpiderError>;
 pub type DynPipeline = dyn Pipeline<Error = SpiderError>;
-pub type DynDuplicateRemover = dyn DuplicateRemover<Error = SpiderError>;
-pub type DynRequestQueue = dyn RequestQueue<Error = SpiderError>;
+// `DynDuplicateRemover` is re-exported from `crate::scheduler`; do not redeclare here.
+use crate::DynDuplicateRemover;
 
-const DEFAULT_MEMORY_QUEUE_CAPACITY: usize = 1024;
-
-enum SchedulerConfig {
-    Memory {
-        queue_capacity: usize,
-    },
-    Distributed {
-        deduplicator: Arc<DynDuplicateRemover>,
-        queue: Arc<DynRequestQueue>,
-    },
-    Custom {
-        scheduler: Arc<DynScheduler>,
-    },
+/// SchedulerWiring captures how the scheduler facade should be built at `build` time.
+///
+/// In the integrated runtime, the scheduler always sits on top of a `SpiderEngine`, so most
+/// wiring options just choose how the deduplicator is provided. Custom schedulers that own
+/// their own dispatch path can still be injected directly.
+enum SchedulerWiring {
+    DefaultMemoryDedup,
+    DefaultWithDedup(Arc<DynDuplicateRemover>),
+    Custom(Arc<DynScheduler>),
 }
 
-impl Default for SchedulerConfig {
+impl Default for SchedulerWiring {
     fn default() -> Self {
-        Self::Memory {
-            queue_capacity: DEFAULT_MEMORY_QUEUE_CAPACITY,
-        }
+        Self::DefaultMemoryDedup
     }
 }
 
@@ -40,8 +33,9 @@ impl Default for SchedulerConfig {
 pub struct SpiderBuilder {
     downloader: Option<Arc<DynDownloader>>,
     processor: Option<Arc<DynPageProcessor>>,
-    scheduler: SchedulerConfig,
+    scheduler: SchedulerWiring,
     pipeline: Option<Arc<DynPipeline>>,
+    engine_config: Option<EngineConfig>,
 }
 
 impl SpiderBuilder {
@@ -59,45 +53,43 @@ impl SpiderBuilder {
         self
     }
 
-    pub fn scheduler(mut self, scheduler: Arc<DynScheduler>) -> Self {
-        self.scheduler = SchedulerConfig::Custom { scheduler };
-        self
-    }
-
     pub fn pipeline(mut self, pipeline: Arc<DynPipeline>) -> Self {
         self.pipeline = Some(pipeline);
         self
     }
 
-    pub fn with_memory_scheduler(mut self, queue_capacity: usize) -> Self {
-        self.scheduler = SchedulerConfig::Memory { queue_capacity };
+    /// Override the engine configuration. When omitted, `EngineConfig::default()` is used.
+    pub fn engine_config(mut self, config: EngineConfig) -> Self {
+        self.engine_config = Some(config);
         self
     }
 
-    pub fn with_distributed_scheduler(
-        mut self,
-        deduplicator: Arc<DynDuplicateRemover>,
-        queue: Arc<DynRequestQueue>,
-    ) -> Self {
-        self.scheduler = SchedulerConfig::Distributed {
-            deduplicator,
-            queue,
-        };
+    /// Inject a custom deduplicator while keeping the default engine-backed scheduler.
+    pub fn deduplicator(mut self, deduplicator: Arc<DynDuplicateRemover>) -> Self {
+        self.scheduler = SchedulerWiring::DefaultWithDedup(deduplicator);
+        self
+    }
+
+    /// Inject a fully custom scheduler. The supplied scheduler is responsible for routing
+    /// accepted requests to whatever execution backend it represents.
+    pub fn scheduler(mut self, scheduler: Arc<DynScheduler>) -> Self {
+        self.scheduler = SchedulerWiring::Custom(scheduler);
         self
     }
 
     pub fn build(self) -> Result<Spider, SpiderError> {
+        let engine = SpiderEngine::new(self.engine_config.unwrap_or_default());
+
         let scheduler = match self.scheduler {
-            SchedulerConfig::Memory { queue_capacity } => {
-                let deduplicator = Arc::new(MemoryDuplicateRemover::new());
-                let (queue, _receiver) = MemoryRequestQueue::bounded(queue_capacity);
-                Arc::new(DefaultScheduler::new(deduplicator, Arc::new(queue))) as Arc<DynScheduler>
+            SchedulerWiring::DefaultMemoryDedup => {
+                let deduplicator: Arc<DynDuplicateRemover> =
+                    Arc::new(MemoryDuplicateRemover::new());
+                Arc::new(DefaultScheduler::new(deduplicator, engine.clone())) as Arc<DynScheduler>
             }
-            SchedulerConfig::Distributed {
-                deduplicator,
-                queue,
-            } => Arc::new(DefaultScheduler::new(deduplicator, queue)) as Arc<DynScheduler>,
-            SchedulerConfig::Custom { scheduler } => scheduler,
+            SchedulerWiring::DefaultWithDedup(deduplicator) => {
+                Arc::new(DefaultScheduler::new(deduplicator, engine.clone())) as Arc<DynScheduler>
+            }
+            SchedulerWiring::Custom(scheduler) => scheduler,
         };
 
         Ok(Spider {
@@ -113,6 +105,7 @@ impl SpiderBuilder {
                     .pipeline
                     .ok_or_else(|| SpiderError::new(SpiderStage::Build, "missing pipeline"))?,
             },
+            engine,
         })
     }
 }
@@ -125,8 +118,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        BoxFuture, DedupOutcome, HeaderMap, Item, Page, ProcessResult, QueueOutcome, Request,
-        ScheduleBatchResult, ScheduledRequest,
+        BoxFuture, DedupOutcome, DuplicateRemover, HeaderMap, Item, Page, ProcessResult,
+        QueueOutcome, Request, ScheduleBatchResult, ScheduledRequest,
     };
 
     struct NoopDownloader;
@@ -185,6 +178,10 @@ mod tests {
                 })
             })
         }
+
+        fn close(&self) -> BoxFuture<'_, Result<(), Self::Error>> {
+            Box::pin(async { Ok(()) })
+        }
     }
 
     impl Pipeline for NoopPipeline {
@@ -231,9 +228,8 @@ mod tests {
     }
 
     #[test]
-    fn spider_builder_accepts_distributed_scheduler_parts() {
+    fn spider_builder_accepts_custom_deduplicator() {
         struct NoopDedup;
-        struct NoopQueue;
 
         impl DuplicateRemover for NoopDedup {
             type Error = SpiderError;
@@ -243,18 +239,10 @@ mod tests {
             }
         }
 
-        impl RequestQueue for NoopQueue {
-            type Error = SpiderError;
-
-            fn push(&self, _request: Request) -> BoxFuture<'_, Result<(), Self::Error>> {
-                Box::pin(async { Ok(()) })
-            }
-        }
-
         let spider = SpiderBuilder::new()
             .downloader(Arc::new(NoopDownloader))
             .page_processor(Arc::new(NoopProcessor))
-            .with_distributed_scheduler(Arc::new(NoopDedup), Arc::new(NoopQueue))
+            .deduplicator(Arc::new(NoopDedup))
             .pipeline(Arc::new(NoopPipeline))
             .build()
             .expect("builder should succeed");

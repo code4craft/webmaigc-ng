@@ -18,9 +18,15 @@
 
 ## 4. 双态部署
 
-- [ ] 4.1 定义 Quick Start 本地模式的运行模型、配置加载方式和 stdout/stderr 约束
-- [ ] 4.2 定义 Server 分布式模式中 JS/TS 控制面、Rust Daemon、Redis 广播和 Kafka 路由的职责划分
-- [ ] 4.3 定义全局去重中心与按域名路由亲和性的协作关系
+- [x] 4.1 定义 Quick Start 本地模式的运行模型、配置加载方式和 stdout/stderr 约束
+  - [x] 4.1.1 定义端到端运行模型（Spider::run、in-flight 反馈、终止顺序）
+  - [x] 4.1.2 定义 CLI 配置加载方式（位置参数收 seed、`-h/--help` 输出 usage）
+  - [x] 4.1.3 定义 stdout 数据流与 stderr 日志的具体管道约束（JsonLinesPipeline + stderr-only 进度日志）
+- [x] 4.2 提供最基础的 HTML 通用 `PageProcessor`，解析页面所有 link 并回写 `Scheduler`
+- [x] 4.3 在抓取配置中增加单站点最多页面数限制，并在调度链路中强制收敛
+  - [x] 4.3.1 增加真实抓取测试，验证 `https://www.fifa.com/en/news` 在 10 页上限下的端到端表现
+- [ ] 4.4 定义 Server 分布式模式中 JS/TS 控制面、Rust Daemon、Redis 广播和 Kafka 路由的职责划分
+- [ ] 4.5 定义全局去重中心与按域名路由亲和性的协作关系
 
 ## 5. 合规与观测
 

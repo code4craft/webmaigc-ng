@@ -56,7 +56,7 @@
 
 - `apps/cli` 只消费 `request` 中的共享 contract，不在 CLI 中重新定义 request 或 page 类型。
 - `apps/cli` 和后续运行时实现通过 `downloader / processor / scheduler / pipeline` 注入组件，而不是绕开 shared core 自定义接口。
-- `SpiderBuilder` 默认装配内存去重 + 内存队列；如果用户提供分布式去重器和队列实现，则切换为分布式调度门面。
+- `SpiderBuilder` 默认装配内存去重 + engine-backed 默认调度器；如果用户提供分布式去重器或自定义调度器，则切换为对应装配。
 - `services/server` 若未来需要项目定义或发布协议，应放在更上层模块，不直接塞回当前最小 core。
 - `services/worker` 只读取运行时共享对象，不在 worker 私有定义执行期 contract。
 
@@ -66,6 +66,14 @@
 - `PageProcessor`: 只负责把页面转换为结构化结果和新请求，不拥有调度与持久化。
 - `Scheduler`: 统一封装去重和排队，对上层暴露单一调度门面，并返回逐请求调度反馈。
 - `Pipeline`: 只负责结果落地，不参与页面解析与抓取顺序控制。
+
+当前内置的基础 `HtmlLinkPageProcessor` 语义是：
+
+- 解析 HTML 页面中的 `href`
+- 基于 `Page::final_url` 解析相对链接
+- 过滤跨站、`mailto:`、`javascript:`、`tel:`、纯 fragment 和非 HTTP(S) 链接
+- 在单页内先做一次去重，再把链接作为新请求集合返回给 `Scheduler`
+- 同时输出当前页面的基础元信息 `Item`，便于 Quick Start 模式直接观察抓取结果
 
 当前默认下载器的能力边界是：
 
@@ -106,24 +114,41 @@
 当前 `Scheduler` 的门面语义是：
 
 - 输入一个请求批次
-- 内部完成去重判断和入队动作
+- 内部完成去重判断和派发动作
 - 输出 `ScheduleBatchResult`
 - 逐请求反馈以 `ScheduledRequest` 表达，其中明确区分：
   - `DedupOutcome`
   - `QueueOutcome`
+- 默认实现中，请求通过去重后会直接进入 `SpiderEngine::dispatch`，由 Domain Dispatcher 再汇入全局 worker 通道。
+- 默认实现支持 `max_pages_per_site` 配置，按域名统计已接受页面数；达到上限后，同域名新请求直接丢弃。
+- 通过 `close` 暴露关闭门面，阻止后续提交；单机和分布式实现都用同一种方式优雅终止。
+
+当前 `RequestQueue` 的最小 contract 是：
+
+- `push` 写入新请求
+- `pop` 拉取下一个请求，关闭后返回 `Ok(None)`
+- `close` 标记队列为关闭，让阻塞中的 `pop` 调用按 `Ok(None)` 收敛
+
+`RequestQueue` / `MemoryRequestQueue` 现在只保留为扩展缝，用于未来分布式调度器或测试场景；本地默认运行链路不再经由它装配。
 
 当前 `SpiderBuilder` 的装配策略是：
 
-- 默认：单机模式，使用 `MemoryDuplicateRemover + MemoryRequestQueue + DefaultScheduler`
-- 分布式：用户注入 `DuplicateRemover + RequestQueue`，由 `DefaultScheduler` 组合成统一门面
+- 默认：单机模式，使用 `MemoryDuplicateRemover + DefaultScheduler + SpiderEngine`
+- 分布式：用户注入分布式去重器并复用 engine-backed scheduler，或直接注入自定义 `Scheduler`
 - 自定义：用户直接注入自己的 `Scheduler`
+
+当前 `EngineConfig` 除并发与队列参数外，还暴露：
+
+- `max_pages_per_site: Option<usize>`：按域名限制单次抓取最多接受多少页面；`None` 表示不限制
 
 当前事件驱动引擎骨架的任务流是：
 
-- `SpiderEngine` 持有一个全局有界 `async-channel`
+- `SpiderEngine` 持有一个全局有界 `async_channel` MPMC 通道，作为 Scheduler 与 Worker 池之间的“大动脉”
 - 每个域名第一次出现时，在 `DomainDispatcherRegistry` 中注册一个独立 dispatcher
 - 每个 dispatcher 持有自己的 `tokio::sync::mpsc` 队列
-- dispatcher 从域名本地队列取出请求，再转发到全局 Worker 通道
+- `Scheduler::schedule` 把通过去重的请求直接送入对应域名 dispatcher
+- dispatcher 从域名本地队列取出请求，做限流和 crawl-delay 控制后，再转发到全局 Worker 通道
+- `Spider` 在启动时克隆全局 `Receiver` 给多个 worker，让它们并发抢占任务执行 `Downloader → PageProcessor → Pipeline`
 
 当前 Domain Dispatcher 的控制面语义是：
 
@@ -142,6 +167,30 @@
 - `SpiderEngine::should_pull_more()` 返回 `PullDecision`，供本地 seed 注入器或分布式 MQ/Kafka 消费器决定是否继续拉取。
 
 这一步已经把任务流骨架、域名级控制面和多级反压反馈放进 core，后续任务继续补充下载层与分布式协议联动。
+
+当前 `Spider::run` 的运行模型是：
+
+- 入参为 seed 请求列表；`EngineConfig` 在 build 时注入，不传则用默认。
+- 启动 `worker_count` 个 worker 协程，从 `SpiderEngine` 全局通道消费请求，串联 `Downloader → PageProcessor → Pipeline`，并把派生请求回写 `Scheduler::schedule`。
+- 主流程维护 `in_flight` 计数：`schedule` 接受的请求数为初始值，每个 worker 完成一个请求扣减 1、新派生 accepted 加回；`in_flight` 归零即视为运行结束。
+- 终止顺序：`Scheduler::close` → `SpiderEngine::shutdown` 关闭全局通道 → worker 退出 → 汇总 `RunReport`。
+- `RunReport` 当前仅暴露 `processed / items / discovered / errors` 计数，不返回逐请求详情，避免在长跑场景下把详细记录全部装载进内存。
+- 如果配置了 `max_pages_per_site`，运行会在对应域名达到页数上限后停止接受新的同域名请求，但已接受任务仍会被处理完，保证收敛路径保持单一。
+
+这一步把单机模式的端到端运行模型落到 core，让 CLI/Server/Worker 共享同一个装配 + 运行 contract。
+
+当前默认 Pipeline 实现：
+
+- `JsonLinesPipeline` 把每个 `Item` 序列化为单行 JSON 写入注入的 `Write` 端。
+- `JsonLinesPipeline::stdout()` 是 Quick Start CLI 的默认数据通道，绑定到进程的 stdout。
+- 任何实现 `Write + Send + 'static` 的对象都可以通过 `from_writer` 注入，用于测试或将数据流重定向到文件。
+- 序列化失败、IO 失败或 Mutex 中毒会以 `SpiderStage::Pipeline` 报告 `SpiderError`。
+
+Quick Start CLI（`apps/cli`）的最小行为约束：
+
+- 通过命令行位置参数收集 seed URL，无 seed 或 `-h/--help` 时把 usage 写入 stderr 并以非零或 0 退出。
+- 默认装配 `DefaultDownloader` + `UrlEchoProcessor`（仅输出页面元信息）+ `JsonLinesPipeline::stdout()`，让 `cargo run -p webmagic-cli https://example.com` 端到端跑通。
+- Item 数据流走 stdout，运行进度与汇总信息走 stderr，避免污染下游 Unix 工具消费的数据。
 
 ## Open Questions
 
