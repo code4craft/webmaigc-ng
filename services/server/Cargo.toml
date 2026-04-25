@@ -1,0 +1,10 @@
+[package]
+name = "webmagic-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+webmagic-core = { path = "../../crates/core" }
+
