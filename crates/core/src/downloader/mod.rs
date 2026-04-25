@@ -1,4 +1,6 @@
 mod downloader;
+#[cfg(test)]
+mod tests;
 
 pub use downloader::{
     BoxFuture, CompressionConfig, ConnectionPoolConfig, DefaultDownloader, DefaultDownloaderConfig,

@@ -1,6 +1,8 @@
 mod builder;
 mod engine;
 mod error;
+#[cfg(test)]
+mod tests;
 mod types;
 
 pub use builder::{DynDownloader, DynPageProcessor, DynPipeline, DynScheduler, SpiderBuilder};
