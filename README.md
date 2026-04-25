@@ -2,6 +2,12 @@
 
 `webmagic-ng` 是一个 Rust workspace，目标是逐步演进为同时支持 Quick Start 和 Server 模式的双模式爬虫平台。
 
+## Toolchain
+
+- 仓库当前锁定 Rust `1.93.0`，见 [rust-toolchain.toml](/Users/yihua/coding/code4craft/webmaigc-ng/rust-toolchain.toml)。
+- 首次进入仓库前，建议先确认本机已安装对应工具链：`rustup toolchain install 1.93.0`
+- 之后直接在仓库根目录运行 `cargo test`、`cargo fmt`、`cargo clippy`
+
 ## Workspace Layout
 
 - `apps/cli`: 本地命令行入口，承接 Quick Start 模式。
@@ -21,4 +27,3 @@
 - 定义仓库规范
 
 后续任务请参考 `openspec/changes/build-dual-mode-crawler-platform/tasks.md`。
-

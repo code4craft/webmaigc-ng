@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::HeaderMap;
+use crate::{HeaderMap, SpiderError, SpiderStage};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Request {
@@ -22,6 +22,30 @@ impl Request {
             body: None,
             labels: BTreeMap::new(),
         }
+    }
+
+    pub fn domain_key(&self) -> Result<String, SpiderError> {
+        extract_host(&self.url)
+            .ok_or_else(|| SpiderError::new(SpiderStage::Schedule, "request url has no host"))
+    }
+}
+
+fn extract_host(url: &str) -> Option<String> {
+    let without_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let host_port = without_scheme.split('/').next()?;
+    let host = host_port.split('@').next_back()?;
+    let host = if host.starts_with('[') {
+        host.split(']')
+            .next()
+            .map(|segment| format!("{segment}]"))?
+    } else {
+        host.split(':').next()?.to_string()
+    };
+
+    if host.is_empty() {
+        None
+    } else {
+        Some(host)
     }
 }
 
