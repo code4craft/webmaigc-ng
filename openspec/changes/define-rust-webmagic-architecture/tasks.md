@@ -1,8 +1,8 @@
 ## 1. 核心抽象
 
-- [ ] 1.1 扩展 `core-module` 规范，定义 Downloader、PageProcessor、Scheduler、Pipeline 四大 Trait 的职责边界
-- [ ] 1.2 定义 SpiderBuilder、Page、Request、ProcessResult 等共享运行时 contract
-- [ ] 1.3 明确 `Scheduler` 对去重与排队的统一门面语义
+- [x] 1.1 扩展 `core-module` 规范，定义 Downloader、PageProcessor、Scheduler、Pipeline 四大 Trait 的职责边界
+- [x] 1.2 定义 SpiderBuilder、Page、Request、ProcessResult 等共享运行时 contract
+- [x] 1.3 明确 `Scheduler` 对去重与排队的统一门面语义
 
 ## 2. 引擎与运行时
 

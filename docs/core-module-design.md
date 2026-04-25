@@ -4,13 +4,13 @@
 
 `crates/core` 是 webmagic-ng 双模式架构的共享底座。它必须同时服务 Quick Start 本地链路、Server 发布链路和 Worker 执行链路，因此只能承载稳定、可复用、与运行时无关的核心 contract。
 
-当前最关键的职责是定义 crawler project model，也就是“一个爬虫项目如何被描述、校验、版本化并被不同运行时一致解释”。
+当前最关键的职责是定义 Spider 运行时共享 contract，也就是“请求、页面、处理结果、组件接口和引擎装配方式如何被不同运行时一致解释”。
 
 ## Goals
 
-- 定义 crawler project 的核心数据结构和字段边界。
-- 定义本地运行与服务端发布共享的 project contract。
-- 定义项目版本、静态校验和环境校验的统一语义。
+- 定义 Spider 运行时共享数据结构和字段边界。
+- 定义本地运行与服务端执行共享的运行时 contract。
+- 保持组件接口与引擎装配方式简洁稳定。
 - 保持 `crates/core` 轻量、稳定、可复用。
 
 ## Non-Goals
@@ -21,41 +21,7 @@
 
 ## Core Decisions
 
-### 1. 使用“Project Manifest + Runtime Contract”二层结构
-
-核心模块中的 crawler project 由两部分组成：
-
-- Project Manifest：项目身份、目标站点元数据、输入参数、输出 schema、依赖声明。
-- Runtime Contract：执行入口、环境前提、资源要求、执行前校验约束。
-
-这样做的原因是：
-
-- Manifest 负责表达“项目是什么”。
-- Runtime Contract 负责表达“项目如何被执行”。
-- 这种拆分能同时满足本地 CLI、服务端发布和 Worker 执行，不会把所有关切压进一个巨型结构体。
-
-### 2. 版本身份独立于本地路径
-
-项目版本必须由显式版本标识承载，不能依赖目录名、临时路径或进程内匿名引用。
-
-这样做的原因是：
-
-- Server 任务实例需要稳定绑定到具体项目版本。
-- 日志、审计、回滚和重放都需要同一个可解析的版本身份。
-
-### 3. 校验分为静态校验与环境校验
-
-核心模块需要定义两类前置校验：
-
-- 静态校验：检查字段完整性、入口定义、schema 合法性。
-- 环境校验：检查运行时依赖、配置项和执行前条件是否满足。
-
-这样做的原因是：
-
-- 两类错误需要不同的修复路径。
-- CLI 的 `validate` 和服务端 preflight 可以共享同一套结果类型。
-
-### 4. core 只承载稳定 contract
+### 1. core 只承载运行时最小 contract
 
 `crates/core` 只定义共享领域模型、版本标识、校验结果、基础枚举和错误分类，不直接引入浏览器、HTTP、数据库或任务队列依赖。
 
@@ -66,28 +32,66 @@
 
 ## Integration Guidance
 
-- `apps/cli` 通过 `core` 读取和校验 crawler project。
-- `services/server` 通过 `core` 解析发布请求中的项目定义，并为任务绑定项目版本。
-- `services/worker` 通过 `core` 读取 runtime contract 并执行 preflight 校验。
+- `apps/cli` 通过 `core` 复用请求、页面、结果对象与组件接口。
+- `services/server` 当前只应消费最小运行时共享类型，不在 `core` 内承载项目管理语义。
+- `services/worker` 通过 `core` 复用引擎装配和运行时共享对象。
 
 任何跨模式共享的数据结构，优先先进入 `core`，再由其他模块消费；不要在各模块里复制定义。
 
 ## Current Module Surface
 
-当前 `crates/core` 中，crawler project model 应按如下边界组织：
+当前 `crates/core` 中，应按如下边界组织：
 
-- `crawler::project`: `CrawlerProject`、`ProjectManifest`、`RuntimeContract`、`ProjectVersion` 等稳定 contract。
-- `crawler::validation`: 静态校验、环境校验、错误分类和校验报告。
+- `request`: `Request`、`Page`、`ProcessResult`、`Item` 等抓取流转对象。
+- `dedup`: 去重接口与默认内存实现。
+- `queue`: 请求队列接口与默认内存实现。
+- `downloader` / `processor` / `scheduler` / `pipeline`: 四大核心 Trait 的独立组件模块。
+- `spider::builder`: `SpiderBuilder` 与动态装配相关类型。
+- `spider::error`: `SpiderError` 与 `SpiderStage`。
+- `spider::types`: `Spider`、`SpiderParts` 等聚合对象。
 - `module`: 仓库级模块描述辅助类型。
 
 依赖方向约束如下：
 
-- `apps/cli` 只消费 `crawler::project` 和 `crawler::validation`，不在 CLI 中重新定义 manifest 或 version 类型。
-- `services/server` 通过 `ProjectReference` 绑定项目版本，通过 `ValidationReport` 暴露发布前检查结果。
-- `services/worker` 只读取 `RuntimeContract` 和环境校验结果，不在 worker 私有定义执行前 contract。
+- `apps/cli` 只消费 `request` 中的共享 contract，不在 CLI 中重新定义 request 或 page 类型。
+- `apps/cli` 和后续运行时实现通过 `downloader / processor / scheduler / pipeline` 注入组件，而不是绕开 shared core 自定义接口。
+- `SpiderBuilder` 默认装配内存去重 + 内存队列；如果用户提供分布式去重器和队列实现，则切换为分布式调度门面。
+- `services/server` 若未来需要项目定义或发布协议，应放在更上层模块，不直接塞回当前最小 core。
+- `services/worker` 只读取运行时共享对象，不在 worker 私有定义执行期 contract。
+
+当前四大 Trait 的职责边界如下：
+
+- `Downloader`: 只负责网络 I/O，包括协议、代理、重试、压缩和连接复用。
+- `PageProcessor`: 只负责把页面转换为结构化结果和新请求，不拥有调度与持久化。
+- `Scheduler`: 统一封装去重和排队，对上层暴露单一调度门面，并返回逐请求调度反馈。
+- `Pipeline`: 只负责结果落地，不参与页面解析与抓取顺序控制。
+
+当前共享运行时 contract 放在以下领域模块中：
+
+- `request`: `Request`、`Page`、`Item`、`ProcessResult`
+- `dedup`: `DuplicateRemover`、`MemoryDuplicateRemover`
+- `queue`: `RequestQueue`、`MemoryRequestQueue`
+- `spider::builder`: `SpiderBuilder`
+- `spider::types`: `Spider`、`SpiderParts`
+- `spider::error`: `SpiderError`、`SpiderStage`
+- 顶层组件模块：`downloader`、`processor`、`scheduler`、`pipeline`
+
+当前 `Scheduler` 的门面语义是：
+
+- 输入一个请求批次
+- 内部完成去重判断和入队动作
+- 输出 `ScheduleBatchResult`
+- 逐请求反馈以 `ScheduledRequest` 表达，其中明确区分：
+  - `DedupOutcome`
+  - `QueueOutcome`
+
+当前 `SpiderBuilder` 的装配策略是：
+
+- 默认：单机模式，使用 `MemoryDuplicateRemover + MemoryRequestQueue + DefaultScheduler`
+- 分布式：用户注入 `DuplicateRemover + RequestQueue`，由 `DefaultScheduler` 组合成统一门面
+- 自定义：用户直接注入自己的 `Scheduler`
 
 ## Open Questions
 
-- 首版 manifest 的主序列化格式采用 TOML、YAML 还是 JSON。
-- 入口 contract 首版是否仅支持单入口。
-- 环境校验是否需要区分 `fatal` 和 `warning`。
+- 如果未来重新引入项目定义层，应该放在 `core` 还是更上层 crate。
+- SpiderBuilder 是否需要继续保持纯运行时装配，不承载任何发布或配置协议。
